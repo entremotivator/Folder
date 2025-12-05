@@ -1,17 +1,18 @@
 import streamlit as st
+import json
+import tempfile
+import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-import tempfile
-import os
 
-st.set_page_config(page_title="Google Drive Business Folder Manager", layout="wide")
+st.set_page_config(page_title="Google Drive Business Manager", layout="wide")
 
 st.title("📁 Google Drive – Business Folder Manager")
 
-# ----------------------------
-# SIDEBAR — JSON Upload
-# ----------------------------
+# ---------------------------------------
+# SIDEBAR — GOOGLE LOGIN
+# ---------------------------------------
 st.sidebar.header("🔐 Google Service Account Login")
 
 json_file = st.sidebar.file_uploader("Upload Google Service JSON", type=["json"])
@@ -20,17 +21,26 @@ if not json_file:
     st.info("Upload your Google Service Account JSON to begin.")
     st.stop()
 
-# Create credentials
-credentials = service_account.Credentials.from_service_account_info(
-    json_file.read()
-)
+# Parse the JSON correctly
+try:
+    service_info = json.load(json_file)
+except Exception:
+    st.error("❌ Invalid JSON file. Please upload a valid Google Service Account key.")
+    st.stop()
 
-# Connect to Google Drive
-drive_service = build("drive", "v3", credentials=credentials)
+# Create Google Drive credentials
+try:
+    credentials = service_account.Credentials.from_service_account_info(service_info)
+    drive_service = build("drive", "v3", credentials=credentials)
+except Exception as e:
+    st.error("❌ Could not authenticate with the provided JSON.\n\n" + str(e))
+    st.stop()
 
-# ----------------------------
-# Folder Structure
-# ----------------------------
+st.success("✅ Google Service Account authenticated successfully!")
+
+# ---------------------------------------
+# FOLDER SETTINGS
+# ---------------------------------------
 MAIN_FOLDER_NAME = "Business Main Folder"
 
 SUBFOLDERS = [
@@ -43,83 +53,100 @@ SUBFOLDERS = [
     "007 To be file",
 ]
 
-# ----------------------------
-# Helper Functions
-# ----------------------------
 
+# ---------------------------------------
+# HELPER FUNCTIONS
+# ---------------------------------------
 def find_folder_id(name, parent=None):
-    """Return folder ID if exists, else None."""
+    """Find folder ID by name."""
     query = f"name = '{name}' and mimeType = 'application/vnd.google-apps.folder'"
     if parent:
         query += f" and '{parent}' in parents"
 
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    results = drive_service.files().list(
+        q=query,
+        fields="files(id, name)"
+    ).execute()
+
     items = results.get("files", [])
     return items[0]["id"] if items else None
 
 
 def create_folder(name, parent=None):
-    """Create a folder if not exists; return folder ID."""
+    """Create folder if not exists."""
     existing_id = find_folder_id(name, parent)
     if existing_id:
         return existing_id
 
-    folder_metadata = {
+    metadata = {
         "name": name,
-        "mimeType": "application/vnd.google-apps.folder",
+        "mimeType": "application/vnd.google-apps.folder"
     }
-    if parent:
-        folder_metadata["parents"] = [parent]
 
-    folder = drive_service.files().create(body=folder_metadata, fields="id").execute()
+    if parent:
+        metadata["parents"] = [parent]
+
+    folder = drive_service.files().create(
+        body=metadata,
+        fields="id"
+    ).execute()
+
     return folder.get("id")
 
 
 def list_files(folder_id):
+    """List files inside a Drive folder."""
     results = drive_service.files().list(
         q=f"'{folder_id}' in parents",
-        fields="files(id, name, mimeType, webViewLink)",
+        fields="files(id, name, mimeType, webViewLink)"
     ).execute()
+
     return results.get("files", [])
 
 
-# ----------------------------
-# MAIN LOGIC
-# ----------------------------
+# ---------------------------------------
+# CREATE MAIN + SUBFOLDERS
+# ---------------------------------------
+st.subheader("📦 Folder Structure")
 
-st.subheader("📦 Folder Creation & Status")
+with st.spinner("Checking folders..."):
 
-# Create main folder
-main_folder_id = create_folder(MAIN_FOLDER_NAME)
-st.success(f"Main Folder Ready: **{MAIN_FOLDER_NAME}**")
+    # Create main folder
+    main_folder_id = create_folder(MAIN_FOLDER_NAME)
 
-# Create all subfolders
-folder_map = {}
-for name in SUBFOLDERS:
-    folder_map[name] = create_folder(name, main_folder_id)
+    # Create subfolders
+    folder_map = {}
+    for folder in SUBFOLDERS:
+        folder_map[folder] = create_folder(folder, main_folder_id)
 
-# Show status table
+st.success("📁 All folders ready!")
+
+# Show folder table
 st.write("### Folder Status")
-status_rows = [{"Folder": k, "ID": v} for k, v in folder_map.items()]
-st.table(status_rows)
 
-# ----------------------------
-# FILE UPLOAD SECTION
-# ----------------------------
-st.subheader("📤 Upload Files Into a Folder")
+st.table([
+    {"Folder": name, "Folder ID": fid}
+    for name, fid in folder_map.items()
+])
 
-selected_folder = st.selectbox("Select Folder", SUBFOLDERS)
-file_to_upload = st.file_uploader("Upload a File", type=None)
+# ---------------------------------------
+# FILE UPLOADING
+# ---------------------------------------
+st.subheader("📤 Upload Files")
 
-if file_to_upload:
-    temp_path = os.path.join(tempfile.gettempdir(), file_to_upload.name)
+target_folder = st.selectbox("Select folder to upload into:", SUBFOLDERS)
+uploaded_file = st.file_uploader("Choose a file to upload")
+
+if uploaded_file:
+    temp_path = os.path.join(tempfile.gettempdir(), uploaded_file.name)
     with open(temp_path, "wb") as f:
-        f.write(file_to_upload.read())
+        f.write(uploaded_file.read())
 
     media = MediaFileUpload(temp_path, resumable=True)
+
     file_metadata = {
-        "name": file_to_upload.name,
-        "parents": [folder_map[selected_folder]],
+        "name": uploaded_file.name,
+        "parents": [folder_map[target_folder]]
     }
 
     drive_service.files().create(
@@ -128,20 +155,19 @@ if file_to_upload:
         fields="id"
     ).execute()
 
-    st.success(f"Uploaded **{file_to_upload.name}** to **{selected_folder}**.")
+    st.success(f"✅ Uploaded **{uploaded_file.name}** to **{target_folder}**")
 
-
-# ----------------------------
-# VIEW FILES IN A FOLDER
-# ----------------------------
+# ---------------------------------------
+# FILE VIEWER
+# ---------------------------------------
 st.subheader("📄 View Folder Contents")
 
-view_folder = st.selectbox("Select Folder to View Files", SUBFOLDERS, key="view")
-
+view_folder = st.selectbox("Select folder to view:", SUBFOLDERS, key="viewer")
 files = list_files(folder_map[view_folder])
 
 if not files:
     st.warning("No files in this folder yet.")
 else:
-    for f in files:
-        st.write(f"**{f['name']}** — [Open File]({f['webViewLink']})")
+    st.write("### Files:")
+    for file in files:
+        st.write(f"📄 **{file['name']}** — [Open]({file['webViewLink']})")
